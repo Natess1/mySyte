@@ -4,10 +4,21 @@
   // ---------- Настройки ----------
   // Пароль администратора. Поменяйте на свой.
   const ADMIN_PASSWORD = "admin123";
-  const STORE_KEY = "mysite-data-v1";
+  const STORE_KEY = "mysite-data-v1"; // локальный контент этого браузера
+  const SHARED_CACHE_KEY = "mysite-shared-v1"; // копия общего контента на случай, если сайт недоступен
   const ROLE_KEY = "mysite-role";
 
-  // Максимальный размер видеофайла, загружаемого с устройства
+  // Общий контент живёт в репозитории GitHub
+  const CONTENT_PATH = "data/content.json";
+  const GH_TOKEN_KEY = "mysite-gh-token";
+  const GH_REPO_KEY = "mysite-gh-repo";
+  const GH_BRANCH_KEY = "mysite-gh-branch";
+
+  // Максимальный размер видеофайла:
+  // при публикации на сайт — не больше 95 МБ (лимит GitHub — 100 МБ на файл),
+  // без публикации — ограничение только памятью браузера
+  const GH_MAX_MB = 95;
+  const GH_MAX_BYTES = GH_MAX_MB * 1024 * 1024;
   const VIDEO_MAX_MB = 300;
   const VIDEO_MAX_BYTES = VIDEO_MAX_MB * 1024 * 1024;
 
@@ -99,6 +110,13 @@
   function load() {
     try {
       const d = JSON.parse(localStorage.getItem(STORE_KEY));
+      if (d && d.home) return d;
+    } catch (e) {
+      /* ignore */
+    }
+    // Если своего контента нет — показываем последнюю известную общую версию
+    try {
+      const d = JSON.parse(localStorage.getItem(SHARED_CACHE_KEY));
       if (d && d.home) return d;
     } catch (e) {
       /* ignore */
@@ -254,6 +272,235 @@
     pendingVideoKey = null;
   }
 
+  // ---------- GitHub: общее хранилище для всех посетителей ----------
+  // Контент лежит в самом репозитории: файл data/content.json и папки
+  // data/photos и data/videos. Каждое сохранение в админке — это
+  // отдельный коммит, поэтому вся история изменений видна в GitHub.
+  // Токен хранится только в браузере администратора.
+
+  function ghCfg() {
+    return {
+      token: localStorage.getItem(GH_TOKEN_KEY) || "",
+      repo: localStorage.getItem(GH_REPO_KEY) || "",
+      branch: localStorage.getItem(GH_BRANCH_KEY) || "main",
+    };
+  }
+
+  const ghReady = () => {
+    const c = ghCfg();
+    return !!(c.token && c.repo);
+  };
+
+  const ghApiUrl = (path) =>
+    "https://api.github.com/repos/" + ghCfg().repo + "/contents/" + path;
+
+  function ghHeaders(extra) {
+    return Object.assign(
+      {
+        Authorization: "Bearer " + ghCfg().token,
+        Accept: "application/vnd.github+json",
+      },
+      extra || {},
+    );
+  }
+
+  function ghErrText(status) {
+    if (status === 401)
+      return "токен неверный или устарел (401) — создайте новый и вставьте его в настройках GitHub";
+    if (status === 403)
+      return "нет права записи (403) — у токена должно быть разрешение Contents: Read and write";
+    if (status === 404)
+      return "репозиторий или ветка не найдены (404) — проверьте имя «владелец/репозиторий» и название ветки";
+    return "GitHub ответил ошибкой " + status;
+  }
+
+  const b64ToBytes = (b64) =>
+    Uint8Array.from(atob(String(b64).replace(/\s/g, "")), (c) =>
+      c.charCodeAt(0),
+    );
+
+  function bytesToB64(bytes) {
+    let bin = "";
+    const CH = 0x8000;
+    for (let i = 0; i < bytes.length; i += CH)
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+    return btoa(bin);
+  }
+
+  // sha файла нужен при перезаписи; null — файла в репозитории ещё нет
+  async function ghGetSha(path) {
+    const c = ghCfg();
+    const res = await fetch(
+      ghApiUrl(path) + "?ref=" + encodeURIComponent(c.branch),
+      {
+        headers: ghHeaders({ Accept: "application/vnd.github.object" }),
+        cache: "no-store",
+      },
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(ghErrText(res.status));
+    const j = await res.json();
+    return j.sha || null;
+  }
+
+  // Запись файла в репозиторий = коммит
+  async function ghPutFile(path, bytes, message) {
+    const body = {
+      message: message,
+      branch: ghCfg().branch,
+      content: bytesToB64(bytes),
+    };
+    const sha = await ghGetSha(path);
+    if (sha) body.sha = sha;
+    const res = await fetch(ghApiUrl(path), {
+      method: "PUT",
+      headers: ghHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(ghErrText(res.status));
+    const j = await res.json();
+    return j.content && j.content.sha;
+  }
+
+  async function ghDeleteFile(path, message) {
+    const sha = await ghGetSha(path);
+    if (!sha) return;
+    const res = await fetch(ghApiUrl(path), {
+      method: "DELETE",
+      headers: ghHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        message: message,
+        branch: ghCfg().branch,
+        sha: sha,
+      }),
+    });
+    if (!res.ok) throw new Error(ghErrText(res.status));
+  }
+
+  async function ghUploadBlob(path, blob, message) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    await ghPutFile(path, bytes, message);
+  }
+
+  // Общий контент через API — администратору, всегда свежая версия
+  async function ghGetContent() {
+    const c = ghCfg();
+    const res = await fetch(
+      ghApiUrl(CONTENT_PATH) + "?ref=" + encodeURIComponent(c.branch),
+      { headers: ghHeaders(), cache: "no-store" },
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(ghErrText(res.status));
+    const j = await res.json();
+    return {
+      sha: j.sha,
+      data: JSON.parse(new TextDecoder().decode(b64ToBytes(j.content))),
+    };
+  }
+
+  // Публикации выстраиваются в очередь, чтобы коммиты не конфликтовали
+  let ghChain = Promise.resolve();
+
+  function syncRemote(message) {
+    if (!ghReady()) return;
+    ghChain = ghChain
+      .then(() =>
+        ghPutFile(
+          CONTENT_PATH,
+          new TextEncoder().encode(JSON.stringify(data, null, 2) + "\n"),
+          message,
+        ),
+      )
+      .catch((e) =>
+        alert(
+          "Изменения сохранены в вашем браузере, но опубликовать их не удалось: " +
+            (e && e.message ? e.message : e),
+        ),
+      );
+  }
+
+  // Перенос контента из этого браузера в общий репозиторий.
+  // Фото из встроенных картинок и видео до 95 МБ из IndexedDB
+  // превращаются в файлы в репозитории.
+  async function publishLocalContent() {
+    let local = null;
+    try {
+      local = JSON.parse(localStorage.getItem(STORE_KEY));
+    } catch (e) {
+      /* ignore */
+    }
+    if (!local || !local.home) local = data;
+    local.home = local.home || data.home;
+    local.videos = local.videos || [];
+    local.photos = local.photos || [];
+    local.articles = local.articles || [];
+
+    const problems = [];
+
+    for (const p of local.photos) {
+      if (!p.id) p.id = uid();
+      if (p.src && p.src.startsWith("data:")) {
+        try {
+          const blob = await (await fetch(p.src)).blob();
+          const path = "data/photos/" + p.id + ".jpg";
+          await ghUploadBlob(path, blob, "Фото: " + (p.title || p.id));
+          p.src = path;
+        } catch (e) {
+          problems.push(
+            "фото «" + (p.title || p.id) + "»: " + (e.message || e),
+          );
+        }
+      }
+    }
+
+    for (const v of local.videos) {
+      if (!v.id) v.id = uid();
+      if (v.fileId) {
+        try {
+          const blob = await idbGet(v.fileId);
+          if (!blob) {
+            problems.push(
+              "видео «" +
+                (v.title || v.id) +
+                "»: файл не найден в этом браузере",
+            );
+            continue;
+          }
+          if (blob.size > GH_MAX_BYTES) {
+            problems.push(
+              "видео «" +
+                (v.title || v.id) +
+                "»: больше " +
+                GH_MAX_MB +
+                " МБ — осталось только в вашем браузере, добавьте его ссылкой",
+            );
+            continue;
+          }
+          const m = String(blob.type || "").match(/video\/(\w+)/);
+          const path = "data/videos/" + v.id + "." + (m ? m[1] : "mp4");
+          await ghUploadBlob(path, blob, "Видео: " + (v.title || v.id));
+          delete v.fileId;
+          delete v.url;
+          v.src = path;
+        } catch (e) {
+          problems.push(
+            "видео «" + (v.title || v.id) + "»: " + (e.message || e),
+          );
+        }
+      }
+    }
+
+    data = local;
+    save();
+    render();
+    await ghPutFile(
+      CONTENT_PATH,
+      new TextEncoder().encode(JSON.stringify(data, null, 2) + "\n"),
+      "Перенос моего контента на сайт",
+    );
+    return problems;
+  }
+
   // ---------- Экран выбора роли ----------
   const gate = $("#gate"),
     appEl = $("#app");
@@ -358,11 +605,27 @@
     if (!data.videos.length) return [emptyBlock("videos")];
     const cards = data.videos.map((v) => {
       const wrap = h("div", { class: "video-wrap" });
+      let linked = false;
       if (v.url && isHttp(v.url)) {
+        // Видео по ссылке (YouTube, VK, прямой .mp4)
         wrap.append(videoEmbed(v.url));
-      } else {
+        linked = true;
+      } else if (v.src) {
+        // Видеофайл из репозитория сайта — доступен всем посетителям
+        wrap.append(
+          h("video", {
+            src: v.src,
+            controls: "",
+            preload: "metadata",
+            playsinline: "",
+          }),
+        );
+      } else if (v.fileId) {
+        // Локальный файл из памяти этого браузера
         wrap.append(h("p", { class: "video-note" }, "Загрузка видео…"));
         loadLocalVideo(wrap, v);
+      } else {
+        wrap.append(h("p", { class: "video-note" }, "Видео недоступно"));
       }
       return h(
         "article",
@@ -370,8 +633,8 @@
         wrap,
         h("h3", null, v.title),
         paragraphs(v.text),
-        // В конце карточки — ссылка на видео (кроме локальных файлов)
-        v.url && isHttp(v.url)
+        // В конце карточки — ссылка на видео (только у видео по ссылке)
+        linked
           ? h(
               "p",
               { class: "video-link" },
@@ -523,11 +786,20 @@
             h(
               "button",
               {
-                class: "btn",
+                class: "btn btn-edit",
                 type: "button",
                 onclick: () => openEditor(route),
               },
               "+ Редактирование",
+            ),
+            h(
+              "button",
+              {
+                class: "btn btn-outline btn-gh",
+                type: "button",
+                onclick: () => openGhSettings(),
+              },
+              "GitHub — публикация",
             ),
           )
         : null,
@@ -561,6 +833,8 @@
     adminForm.hidden = true;
     choice.hidden = false;
     $("#editor").close();
+    const gh = $("#gh-settings");
+    if (gh.open) gh.close();
   }
 
   window.addEventListener("hashchange", render);
@@ -683,7 +957,9 @@
           { class: "form-note" },
           editing
             ? "Чтобы заменить видео — выберите новый файл или вставьте ссылку. Иначе останется прежнее."
-            : "Выберите видеофайл на устройстве или вставьте ссылку. Файл хранится в этом браузере.",
+            : ghReady()
+              ? "Выберите видеофайл (до 95 МБ — он попадёт в репозиторий, и его увидят все) или вставьте ссылку на видео."
+              : "Выберите видеофайл на устройстве или вставьте ссылку. Пока GitHub не настроен, файл хранится только в этом браузере.",
         ),
       );
     }
@@ -715,114 +991,179 @@
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      err.hidden = true;
-      const fail = (msg) => {
-        err.textContent = msg;
-        err.hidden = false;
-      };
-      const val = (k) =>
-        form.elements[k] ? form.elements[k].value.trim() : "";
-
-      if (section === "home") {
-        if (!val("title")) return fail("Введите заголовок");
-        data.home = { title: val("title"), text: val("text") };
-      } else if (section === "photos") {
-        const file = form.elements.file.files[0];
-        let src = editing ? editing.src : "";
-        if (file) {
-          try {
-            src = await imageToDataUrl(file);
-          } catch (x) {
-            return fail("Не удалось прочитать изображение");
-          }
-        } else if (val("url")) {
-          if (!isHttp(val("url")))
-            return fail("Ссылка должна начинаться с http:// или https://");
-          src = val("url");
-        }
-        if (!src) return fail("Выберите фото или вставьте ссылку");
-        const item = {
-          id: editing ? editing.id : uid(),
-          title: val("title"),
-          src,
+      const submitBtn = form.querySelector('button[type="submit"]');
+      submitBtn.disabled = true;
+      let msg = "";
+      try {
+        err.hidden = true;
+        const fail = (m) => {
+          err.textContent = m;
+          err.hidden = false;
+          return false;
         };
-        if (editing) items[items.indexOf(editing)] = item;
-        else items.unshift(item);
-      } else {
-        if (!val("title")) return fail("Введите название");
+        const val = (k) =>
+          form.elements[k] ? form.elements[k].value.trim() : "";
 
-        const item = { id: editing ? editing.id : uid() };
-
-        if (section === "videos") {
-          const url = val("url");
-          if (url && !isHttp(url))
-            return fail("Ссылка должна начинаться с http:// или https://");
-
-          const file = form.elements.file
-            ? form.elements.file.files[0]
-            : null;
-          let newKey = null;
+        if (section === "home") {
+          if (!val("title")) return fail("Введите заголовок");
+          data.home = { title: val("title"), text: val("text") };
+          msg = "Обновление приветствия";
+        } else if (section === "photos") {
+          const itemId = editing ? editing.id : uid();
+          const file = form.elements.file.files[0];
+          let src = editing ? editing.src : "";
+          let blob = null;
           if (file) {
-            if (file.size > VIDEO_MAX_BYTES)
-              return fail(
-                "Видеофайл больше " +
-                  VIDEO_MAX_MB +
-                  " МБ — используйте ссылку на видео.",
-              );
-            newKey = "v-" + uid();
             try {
-              await idbPut(newKey, file);
-              pendingVideoKey = newKey;
+              blob = await imageToBlob(file);
             } catch (x) {
-              return fail(
-                "Браузер не смог сохранить этот файл. Попробуйте видео поменьше или вставьте ссылку.",
-              );
+              return fail("Не удалось прочитать изображение");
+            }
+          } else if (val("url")) {
+            if (!isHttp(val("url")))
+              return fail("Ссылка должна начинаться с http:// или https://");
+            src = val("url");
+          }
+          if (!src && !blob) return fail("Выберите фото или вставьте ссылку");
+
+          if (blob) {
+            if (ghReady()) {
+              // Фото уезжает в репозиторий — его увидят все посетители
+              const path = "data/photos/" + itemId + ".jpg";
+              try {
+                await ghUploadBlob(
+                  path,
+                  blob,
+                  (editing ? "Изменено фото: " : "Фото: ") +
+                    (val("title") || itemId),
+                );
+              } catch (x) {
+                return fail(
+                  "Фото не загрузилось на GitHub: " + (x.message || x),
+                );
+              }
+              src = path;
+            } else {
+              src = await blobToDataUrl(blob);
             }
           }
 
-          // Приоритет: новый файл → ссылка → прежнее видео (при изменении)
-          let fileId = null;
-          let videoUrl = "";
-          if (newKey) {
-            fileId = newKey;
-          } else if (url) {
-            videoUrl = url;
-          } else if (editing) {
-            fileId = editing.fileId || null;
-            videoUrl = editing.url || "";
-          }
-          if (!fileId && !videoUrl)
-            return fail(
-              "Выберите видеофайл с устройства или вставьте ссылку на видео",
-            );
-
-          // Старый файл больше не нужен — удаляем его из хранилища
-          if (editing && editing.fileId && editing.fileId !== fileId) {
-            revokeBlobUrl(editing.fileId);
-            idbDelete(editing.fileId);
-          }
-
-          item.title = val("title");
-          item.text = val("text");
-          if (fileId) item.fileId = fileId;
-          if (videoUrl) item.url = videoUrl;
+          const item = { id: itemId, title: val("title"), src: src };
+          if (editing) items[items.indexOf(editing)] = item;
+          else items.unshift(item);
+          msg =
+            (editing ? "Изменено фото: " : "Добавлено фото: ") +
+            (val("title") || "без подписи");
         } else {
-          if (!val("text")) return fail("Введите текст");
-          FIELDS[section].forEach((f) => {
-            if (f.t !== "file") item[f.k] = val(f.k);
-          });
+          if (!val("title")) return fail("Введите название");
+
+          const itemId = editing ? editing.id : uid();
+          const item = { id: itemId };
+
+          if (section === "videos") {
+            const url = val("url");
+            if (url && !isHttp(url))
+              return fail("Ссылка должна начинаться с http:// или https://");
+
+            const file = form.elements.file
+              ? form.elements.file.files[0]
+              : null;
+            const maxMb = ghReady() ? GH_MAX_MB : VIDEO_MAX_MB;
+            let newKey = null; // ключ файла в IndexedDB (локальный режим)
+            let newPath = null; // путь файла в репозитории (общий режим)
+            if (file) {
+              if (file.size > maxMb * 1024 * 1024)
+                return fail(
+                  "Видеофайл больше " +
+                    maxMb +
+                    " МБ — используйте ссылку на видео (YouTube, VK и т.п.).",
+                );
+              if (ghReady()) {
+                const m = String(file.type || "").match(/video\/(\w+)/);
+                newPath = "data/videos/" + itemId + "." + (m ? m[1] : "mp4");
+                try {
+                  await ghUploadBlob(
+                    newPath,
+                    file,
+                    (editing ? "Изменено видео: " : "Видео: ") +
+                      (val("title") || itemId),
+                  );
+                } catch (x) {
+                  return fail(
+                    "Видео не загрузилось на GitHub: " + (x.message || x),
+                  );
+                }
+              } else {
+                newKey = "v-" + uid();
+                try {
+                  await idbPut(newKey, file);
+                  pendingVideoKey = newKey;
+                } catch (x) {
+                  return fail(
+                    "Браузер не смог сохранить этот файл. Попробуйте видео поменьше или вставьте ссылку.",
+                  );
+                }
+              }
+            }
+
+            // Приоритет: новый файл → ссылка → прежнее видео (при изменении)
+            let fileId = null;
+            let videoUrl = "";
+            let videoPath = null;
+            if (newPath) {
+              videoPath = newPath;
+            } else if (newKey) {
+              fileId = newKey;
+            } else if (url) {
+              videoUrl = url;
+            } else if (editing) {
+              fileId = editing.fileId || null;
+              videoUrl = editing.url || "";
+              videoPath = editing.src || null;
+            }
+            if (!fileId && !videoUrl && !videoPath)
+              return fail(
+                "Выберите видеофайл с устройства или вставьте ссылку на видео",
+              );
+
+            // Старый локальный файл больше не нужен — удаляем его из хранилища
+            if (editing && editing.fileId && editing.fileId !== fileId) {
+              revokeBlobUrl(editing.fileId);
+              idbDelete(editing.fileId);
+            }
+
+            item.title = val("title");
+            item.text = val("text");
+            if (fileId) item.fileId = fileId;
+            if (videoUrl) item.url = videoUrl;
+            if (videoPath) item.src = videoPath;
+            msg =
+              (editing ? "Изменено видео: " : "Добавлено видео: ") +
+              (val("title") || itemId);
+          } else {
+            if (!val("text")) return fail("Введите текст");
+            FIELDS[section].forEach((f) => {
+              if (f.t !== "file") item[f.k] = val(f.k);
+            });
+            msg =
+              (editing ? "Изменена статья: " : "Добавлена статья: ") +
+              val("title");
+          }
+
+          if (editing) items[items.indexOf(editing)] = item;
+          else items.unshift(item);
         }
 
-        if (editing) items[items.indexOf(editing)] = item;
-        else items.unshift(item);
+        if (!save()) {
+          data = load();
+          return;
+        }
+        render();
+        renderEditor(section, null);
+        syncRemote(msg);
+      } finally {
+        submitBtn.disabled = false;
       }
-
-      if (!save()) {
-        data = load();
-        return;
-      }
-      render();
-      renderEditor(section, null);
     });
 
     $("#editor-form").replaceChildren(form);
@@ -846,11 +1187,13 @@
                   null,
                   (it.title || "(без названия)") +
                     (section === "videos"
-                      ? it.fileId
-                        ? " · файл"
-                        : it.url
-                          ? " · ссылка"
-                          : ""
+                      ? it.src
+                        ? " · на сайте"
+                        : it.fileId
+                          ? " · файл"
+                          : it.url
+                            ? " · ссылка"
+                            : ""
                       : ""),
                 ),
                 h(
@@ -875,19 +1218,37 @@
                       type: "button",
                       onclick: () => {
                         if (
-                          !confirm("Удалить «" + (it.title || "элемент") + "»?")
+                          !confirm(
+                            "Удалить «" + (it.title || "элемент") + "»?",
+                          )
                         )
                           return;
                         if (it.fileId) {
                           revokeBlobUrl(it.fileId);
                           idbDelete(it.fileId);
                         }
+                        const mediaPath =
+                          it.src && /^data\/(photos|videos)\//.test(it.src)
+                            ? it.src
+                            : null;
                         data[section] = data[section].filter(
                           (x) => x.id !== it.id,
                         );
                         save();
                         render();
                         renderEditor(section, null);
+                        // Файл в репозитории тоже удаляем, чтобы не занимал место
+                        if (ghReady() && mediaPath) {
+                          ghChain = ghChain
+                            .then(() =>
+                              ghDeleteFile(
+                                mediaPath,
+                                "Удалено: " + (it.title || it.id),
+                              ),
+                            )
+                            .catch(() => {});
+                        }
+                        syncRemote("Удалено: " + (it.title || "элемент"));
                       },
                     },
                     "Удалить",
@@ -900,8 +1261,8 @@
     }
   }
 
-  // Уменьшаем фото, чтобы оно поместилось в память браузера
-  function imageToDataUrl(file) {
+  // Уменьшаем фото, чтобы оно поместилось и в память браузера, и в репозиторий
+  function imageToBlob(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onerror = reject;
@@ -915,7 +1276,11 @@
           c.width = Math.round(img.width * k);
           c.height = Math.round(img.height * k);
           c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-          resolve(c.toDataURL("image/jpeg", 0.8));
+          c.toBlob(
+            (b) => (b ? resolve(b) : reject(new Error("canvas"))),
+            "image/jpeg",
+            0.8,
+          );
         };
         img.src = reader.result;
       };
@@ -923,10 +1288,149 @@
     });
   }
 
-  // ---------- Старт ----------
-  if (sessionStorage.getItem(ROLE_KEY)) {
-    gate.hidden = true;
-    appEl.hidden = false;
-    render();
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onerror = reject;
+      r.onload = () => resolve(r.result);
+      r.readAsDataURL(blob);
+    });
   }
+
+  // ---------- Настройки GitHub ----------
+  const ghDialog = $("#gh-settings");
+  const ghRepoInput = $("#gh-repo");
+  const ghBranchInput = $("#gh-branch");
+  const ghTokenInput = $("#gh-token");
+  const ghStatus = $("#gh-status");
+  const ghError = $("#gh-error");
+  const ghPublishBtn = $("#gh-publish");
+
+  function openGhSettings() {
+    const c = ghCfg();
+    ghRepoInput.value = c.repo;
+    ghBranchInput.value = c.branch || "main";
+    ghTokenInput.value = c.token;
+    ghStatus.textContent = ghReady()
+      ? "Подключено: " +
+        c.repo +
+        " (ветка " +
+        (c.branch || "main") +
+        "). Каждое сохранение в админке публикуется автоматически."
+      : "GitHub пока не настроен: сайт видите только вы. Заполните поля ниже и нажмите «Сохранить настройки».";
+    ghError.hidden = true;
+    ghDialog.showModal();
+  }
+
+  ghDialog.addEventListener("cancel", (e) => e.preventDefault());
+  $("#gh-close").addEventListener("click", () => ghDialog.close());
+
+  $("#gh-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const repo = ghRepoInput.value
+      .trim()
+      .replace(/^https?:\/\/github\.com\//i, "")
+      .replace(/\/+$/, "");
+    const branch = ghBranchInput.value.trim() || "main";
+    const token = ghTokenInput.value.trim();
+    if (!repo || !repo.includes("/")) {
+      ghError.textContent =
+        "Укажите репозиторий в формате «владелец/репозиторий», например ivanov/mysite";
+      ghError.hidden = false;
+      return;
+    }
+    localStorage.setItem(GH_REPO_KEY, repo);
+    localStorage.setItem(GH_BRANCH_KEY, branch);
+    if (token) localStorage.setItem(GH_TOKEN_KEY, token);
+    openGhSettings(); // обновляет строку статуса
+  });
+
+  ghPublishBtn.addEventListener("click", async () => {
+    if (!ghReady()) {
+      ghError.textContent =
+        "Сначала заполните репозиторий и токен и нажмите «Сохранить настройки».";
+      ghError.hidden = false;
+      return;
+    }
+    if (
+      !confirm(
+        "Опубликовать на сайте весь ваш текущий контент? Общий вариант будет заменён вашим.",
+      )
+    )
+      return;
+    const old = ghPublishBtn.textContent;
+    ghPublishBtn.disabled = true;
+    ghPublishBtn.textContent = "Публикация…";
+    try {
+      const problems = await publishLocalContent();
+      let msg =
+        "Готово! Ваш контент опубликован в репозитории.\nНа сайте у всех посетителей он появится через 1–2 минуты.";
+      if (problems.length)
+        msg += "\n\nНе удалось перенести:\n- " + problems.join("\n- ");
+      alert(msg);
+      ghDialog.close();
+    } catch (e) {
+      ghError.textContent =
+        "Опубликовать не удалось: " +
+        (e && e.message ? e.message : e) +
+        " Проверьте токен, имя репозитория и ветку.";
+      ghError.hidden = false;
+    } finally {
+      ghPublishBtn.disabled = false;
+      ghPublishBtn.textContent = old;
+    }
+  });
+
+  // ---------- Старт ----------
+  (async () => {
+    const onHttp =
+      location.protocol === "http:" || location.protocol === "https:";
+    let localHasData = false;
+    try {
+      const d = JSON.parse(localStorage.getItem(STORE_KEY));
+      localHasData = !!(d && d.home);
+    } catch (e) {
+      localHasData = false;
+    }
+
+    // Общий контент для всех посетителей.
+    // Администратору с настроенным GitHub — свежая версия прямо из репозитория,
+    // остальным — файл data/content.json с сайта (если он там уже есть).
+    let shared = null;
+    if (isAdmin() && ghReady()) {
+      try {
+        const r = await ghGetContent();
+        if (r && r.data && r.data.home) shared = r.data;
+      } catch (e) {
+        /* нет связи — работаем с локальной версией */
+      }
+    }
+    if (!shared && onHttp && !localHasData) {
+      try {
+        const res = await fetch(CONTENT_PATH + "?t=" + Date.now(), {
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const d = await res.json();
+          if (d && d.home) shared = d;
+        }
+      } catch (e) {
+        /* общего контента нет — работаем локально */
+      }
+    }
+    if (shared) {
+      data = shared;
+      try {
+        localStorage.setItem(SHARED_CACHE_KEY, JSON.stringify(shared));
+      } catch (e) {
+        /* переполнение — не страшно */
+      }
+    }
+
+    if (sessionStorage.getItem(ROLE_KEY)) {
+      gate.hidden = true;
+      appEl.hidden = false;
+      render();
+    }
+  })();
 })();

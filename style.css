@@ -400,6 +400,9 @@ textarea {
   margin-top: 28px;
   text-align: center;
 }
+.admin-zone .btn {
+  margin: 4px 6px;
+}
 
 /* ---------- Нижнее меню ---------- */
 .bottom-nav {

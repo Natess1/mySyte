@@ -97,6 +97,45 @@
       <div id="editor-list"></div>
     </dialog>
 
+    <!-- Настройки публикации на GitHub (для админа) -->
+    <dialog id="gh-settings" class="editor">
+      <div class="editor-head">
+        <h2>GitHub — публикация для всех</h2>
+        <button class="btn btn-small btn-outline" id="gh-close" type="button">
+          Закрыть
+        </button>
+      </div>
+      <p id="gh-status" class="form-note" style="margin-top: 12px"></p>
+      <form id="gh-form" novalidate>
+        <label for="gh-repo">Репозиторий (владелец/репозиторий)</label>
+        <input id="gh-repo" type="text" placeholder="ivanov/mysite" />
+        <label for="gh-branch">Ветка</label>
+        <input id="gh-branch" type="text" value="main" />
+        <label for="gh-token">
+          Токен GitHub с правом записи в этот репозиторий
+        </label>
+        <input
+          id="gh-token"
+          type="password"
+          placeholder="github_pat_…"
+          autocomplete="off"
+        />
+        <p class="form-note">
+          Токен создаётся один раз: GitHub → Settings → Developer settings →
+          Personal access tokens → Fine-grained tokens → Generate new token.
+          Repository access: только этот репозиторий. Permissions → Contents:
+          Read and write. Токен хранится только в вашем браузере.
+        </p>
+        <p class="error" id="gh-error" hidden></p>
+        <div class="form-actions">
+          <button class="btn" type="submit">Сохранить настройки</button>
+          <button class="btn btn-outline" id="gh-publish" type="button">
+            Опубликовать мой текущий контент
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <!-- Просмотр фото -->
     <dialog id="lightbox" class="lightbox">
       <img id="lightbox-img" alt="" />
