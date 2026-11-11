@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Мой сайт</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Экран выбора роли -->
+    <div id="gate" class="gate">
+      <div class="gate-box">
+        <h1>Добро пожаловать</h1>
+
+        <div id="gate-choice">
+          <p class="muted">Выберите, как вы хотите зайти на сайт</p>
+          <div class="gate-buttons">
+            <button class="btn btn-big" id="btn-user" type="button">
+              Я пользователь
+            </button>
+            <button
+              class="btn btn-big btn-outline"
+              id="btn-admin"
+              type="button"
+            >
+              Я администратор
+            </button>
+          </div>
+        </div>
+
+        <form id="gate-admin" class="admin-card" hidden>
+          <div class="avatar" aria-hidden="true">A</div>
+          <h2>Администратор</h2>
+          <label for="admin-pass">Пароль</label>
+          <input
+            id="admin-pass"
+            type="password"
+            autocomplete="current-password"
+            required
+          />
+          <p id="gate-error" class="error" role="alert" hidden>
+            Неверный пароль
+          </p>
+          <div class="gate-buttons">
+            <button class="btn" type="submit">Войти</button>
+            <button class="btn btn-outline" id="gate-back" type="button">
+              Назад
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Сам сайт -->
+    <div id="app" hidden>
+      <header id="header" class="site-header">
+        <div class="pink-rect" aria-hidden="true"></div>
+        <h1 class="site-title">Мой сайт</h1>
+        <div class="pink-rect" aria-hidden="true"></div>
+      </header>
+
+      <main id="main" class="main"></main>
+
+      <nav class="bottom-nav" aria-label="Основное меню">
+        <a href="#home" data-route="home"
+          ><span class="ico">⌂</span><span>Главная</span></a
+        >
+        <a href="#videos" data-route="videos"
+          ><span class="ico">▶</span><span>Видео-уроки</span></a
+        >
+        <a href="#photos" data-route="photos"
+          ><span class="ico">◧</span><span>Фото</span></a
+        >
+        <a href="#articles" data-route="articles"
+          ><span class="ico">☰</span><span>Статьи</span></a
+        >
+      </nav>
+    </div>
+
+    <!-- Редактор (для админа) -->
+    <dialog id="editor" class="editor">
+      <div class="editor-head">
+        <h2 id="editor-title">Редактирование</h2>
+        <button
+          class="btn btn-small btn-outline"
+          id="editor-close"
+          type="button"
+        >
+          Закрыть
+        </button>
+      </div>
+      <div id="editor-form"></div>
+      <h3 id="editor-list-title">Уже добавлено</h3>
+      <div id="editor-list"></div>
+    </dialog>
+
+    <!-- Просмотр фото -->
+    <dialog id="lightbox" class="lightbox">
+      <img id="lightbox-img" alt="" />
+    </dialog>
+
+    <script src="app.js"></script>
+  </body>
+</html>
